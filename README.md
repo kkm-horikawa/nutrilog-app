@@ -57,6 +57,321 @@
 
 ---
 
+## 設計思想
+
+### 1. 柔軟な栄養素管理（ハードコードしない）
+
+**全ての栄養素を動的に管理。** 将来的に新しい栄養素を追加しても、コード変更なしで対応できる設計。
+
+```dart
+// ❌ ハードコード（拡張性なし）
+class NutrientData {
+  final double calories;
+  final double protein;
+  final double magnesium;
+  // 栄養素が増えるたびにクラス修正...
+}
+
+// ✅ 柔軟な設計
+class NutrientEntry {
+  final String nutrientId;    // "calories", "protein", "magnesium", etc.
+  final double value;
+  final String unit;
+}
+
+class FoodNutrition {
+  final List<NutrientEntry> nutrients;  // 任意の栄養素を持てる
+}
+```
+
+**栄養素マスタ（動的に追加可能）：**
+
+```sql
+CREATE TABLE nutrient_definitions (
+  id TEXT PRIMARY KEY,           -- "magnesium", "vitamin_d", etc.
+  name_ja TEXT NOT NULL,         -- "マグネシウム"
+  name_en TEXT,                  -- "Magnesium"
+  unit TEXT NOT NULL,            -- "mg", "μg", "g", "kcal"
+  category TEXT,                 -- "macro", "mineral", "vitamin", "other"
+  display_order INTEGER,         -- 表示順
+  color TEXT,                    -- グラフの色（Hex）
+  is_active INTEGER DEFAULT 1,   -- 表示するかどうか
+  description TEXT,              -- なぜ重要か
+  created_at TEXT
+);
+```
+
+これにより：
+- ユーザーが追跡したい栄養素だけを選択できる
+- 新しい研究で重要性が判明した栄養素を後から追加できる
+- 国や地域によって異なる栄養素基準に対応できる
+
+---
+
+### 2. プロフィールベースの目標自動算出
+
+**ユーザーのプロフィールから、科学的根拠に基づいて推奨値を自動計算。**
+
+```
+┌─────────────────────────────────────────────────┐
+│  👤 プロフィール設定                              │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  基本情報                                        │
+│  ├ 性別:     [男性 ▼]                           │
+│  ├ 年齢:     [30] 歳                            │
+│  ├ 身長:     [177] cm                           │
+│  ├ 体重:     [82] kg                            │
+│  └ 体脂肪率: [25] % (任意)                      │
+│                                                 │
+│  活動レベル                                      │
+│  ├ 日常:     [座り仕事中心 ▼]                   │
+│  └ 運動:     [週3回 筋トレ + 毎日ウォーキング]  │
+│                                                 │
+│  目標                                           │
+│  ├ 目的:     [◉減量 ○維持 ○増量]              │
+│  ├ 目標体重: [67] kg                            │
+│  ├ ペース:   [月2.5kg ▼]  ← 推奨範囲内か警告   │
+│  └ 重視:     [☑筋肉維持 ☑微量栄養素]          │
+│                                                 │
+│            [推奨値を計算]                        │
+└─────────────────────────────────────────────────┘
+```
+
+**計算ロジック：**
+
+```dart
+class NutrientCalculator {
+
+  /// 基礎代謝（Mifflin-St Jeor式）
+  double calculateBMR(Profile profile) {
+    if (profile.isMale) {
+      return 10 * profile.weightKg + 6.25 * profile.heightCm - 5 * profile.age + 5;
+    } else {
+      return 10 * profile.weightKg + 6.25 * profile.heightCm - 5 * profile.age - 161;
+    }
+  }
+
+  /// 総消費カロリー（TDEE）
+  double calculateTDEE(Profile profile) {
+    final bmr = calculateBMR(profile);
+    return bmr * profile.activityMultiplier;  // 1.2〜1.9
+  }
+
+  /// 目標カロリー
+  double calculateTargetCalories(Profile profile) {
+    final tdee = calculateTDEE(profile);
+    switch (profile.goal) {
+      case Goal.lose:
+        // 月2.5kg減 = 1日約580kcal deficit
+        return tdee - (profile.monthlyLossKg * 7700 / 30);
+      case Goal.maintain:
+        return tdee;
+      case Goal.gain:
+        return tdee + 300;  // 緩やかな増量
+    }
+  }
+
+  /// タンパク質（体重ベース）
+  double calculateProtein(Profile profile) {
+    // 減量中は高め（筋肉維持）、増量中は中程度
+    final multiplier = profile.goal == Goal.lose ? 2.0 : 1.6;
+    return profile.weightKg * multiplier;
+  }
+
+  /// 微量栄養素（年齢・性別・目標ベース）
+  Map<String, NutrientGoal> calculateMicronutrients(Profile profile) {
+    return {
+      'magnesium': NutrientGoal(
+        target: profile.isMale ? 340 : 270,
+        unit: 'mg',
+        note: '筋トレする場合は+50mg推奨',
+      ),
+      'vitamin_d': NutrientGoal(
+        target: 15,  // μg
+        unit: 'μg',
+        note: '冬季は20μg推奨',
+      ),
+      // ... 他の栄養素
+    };
+  }
+}
+```
+
+**算出結果の表示：**
+
+```
+┌─────────────────────────────────────────────────┐
+│  📊 あなたの推奨栄養素                           │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  🔥 カロリー: 1,720 kcal/日                     │
+│     ├ 基礎代謝: 1,800 kcal                      │
+│     ├ 活動代謝: 2,300 kcal                      │
+│     └ 目標: -580 kcal (月2.5kg減)              │
+│                                                 │
+│  🥩 タンパク質: 164g (体重×2.0)                 │
+│     └ 筋肉維持のため高めに設定                  │
+│                                                 │
+│  🧪 微量栄養素                                   │
+│     ├ Mg: 340mg ⚠️ 筋トレ時は390mg推奨         │
+│     ├ Zn: 11mg                                  │
+│     ├ D:  15μg ⚠️ 冬季は20μg推奨              │
+│     └ B6: 1.4mg                                 │
+│                                                 │
+│  💡 科学的根拠に基づく推奨値です。               │
+│     個人差があるため、体調を見ながら調整を。     │
+│                                                 │
+│  [この設定を使う]  [手動でカスタマイズ]          │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+### 3. 目標のカスタマイズ
+
+**推奨値をベースに、ユーザーが自由に調整可能。**
+
+```
+┌─────────────────────────────────────────────────┐
+│  ⚙️ 目標カスタマイズ                             │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  追跡する栄養素を選択:                           │
+│                                                 │
+│  マクロ栄養素                                    │
+│  ├ ☑ カロリー     [1720] kcal   [推奨値に戻す] │
+│  ├ ☑ タンパク質   [164] g       [推奨値に戻す] │
+│  ├ ☑ 脂質        [50] g        [推奨値に戻す] │
+│  ├ ☑ 炭水化物    [180] g       [推奨値に戻す] │
+│  └ ☑ 食物繊維    [20] g        [推奨値に戻す] │
+│                                                 │
+│  ミネラル                                        │
+│  ├ ☑ マグネシウム [340] mg      [推奨値に戻す] │
+│  ├ ☑ 亜鉛        [11] mg       [推奨値に戻す] │
+│  ├ ☐ 鉄          --- (非表示)                  │
+│  ├ ☐ カルシウム   --- (非表示)                  │
+│  └ ☐ カリウム     --- (非表示)                  │
+│                                                 │
+│  ビタミン                                        │
+│  ├ ☑ ビタミンD   [15] μg       [推奨値に戻す] │
+│  ├ ☑ ビタミンB6  [1.4] mg      [推奨値に戻す] │
+│  ├ ☐ ビタミンB12  --- (非表示)                  │
+│  └ ☐ ビタミンC    --- (非表示)                  │
+│                                                 │
+│  [+ カスタム栄養素を追加]                        │
+│                                                 │
+│              [保存]                             │
+└─────────────────────────────────────────────────┘
+```
+
+**カスタム栄養素の追加例：**
+
+```
+┌─────────────────────────────────────────────────┐
+│  ➕ カスタム栄養素を追加                         │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  名前:    [クレアチン        ]                  │
+│  単位:    [g ▼]                                 │
+│  目標値:  [5]                                   │
+│  カテゴリ: [サプリメント ▼]                     │
+│                                                 │
+│  💡 食品DBに含まれない栄養素も追跡できます       │
+│     （サプリ摂取量の記録など）                   │
+│                                                 │
+│  [キャンセル]          [追加]                   │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+### 4. 目標別プリセット
+
+**よくある目標パターンをワンタップで設定。**
+
+```
+┌─────────────────────────────────────────────────┐
+│  🎯 目標プリセット                               │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  ┌─────────────────────────────────────────┐   │
+│  │ 🔥 減量（筋肉維持）                      │   │
+│  │ カロリー制限 + 高タンパク + 微量栄養素重視│   │
+│  │ おすすめ: 月2-3kgペースの減量            │   │
+│  └─────────────────────────────────────────┘   │
+│                                                 │
+│  ┌─────────────────────────────────────────┐   │
+│  │ 💪 筋肥大（バルクアップ）                 │   │
+│  │ カロリー余剰 + 高タンパク + 炭水化物多め  │   │
+│  │ おすすめ: クリーンバルク                 │   │
+│  └─────────────────────────────────────────┘   │
+│                                                 │
+│  ┌─────────────────────────────────────────┐   │
+│  │ ⚖️ 体重維持                              │   │
+│  │ TDEE維持 + 適度なタンパク質              │   │
+│  │ おすすめ: リコンプ（体組成改善）          │   │
+│  └─────────────────────────────────────────┘   │
+│                                                 │
+│  ┌─────────────────────────────────────────┐   │
+│  │ 🏃 持久系アスリート                       │   │
+│  │ 高炭水化物 + 鉄・B群重視                 │   │
+│  │ おすすめ: マラソン、サイクリング等        │   │
+│  └─────────────────────────────────────────┘   │
+│                                                 │
+│  ┌─────────────────────────────────────────┐   │
+│  │ ⚙️ 完全カスタム                          │   │
+│  │ 全ての値を自分で設定                     │   │
+│  └─────────────────────────────────────────┘   │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+### DBスキーマ追加
+
+```sql
+-- ユーザープロフィール
+CREATE TABLE user_profile (
+  id INTEGER PRIMARY KEY DEFAULT 1,  -- シングルユーザー想定
+  gender TEXT,                        -- male/female
+  birth_date TEXT,                    -- YYYY-MM-DD
+  height_cm REAL,
+  weight_kg REAL,
+  body_fat_percent REAL,              -- nullable
+  activity_level TEXT,                -- sedentary/light/moderate/active/very_active
+  goal TEXT,                          -- lose/maintain/gain
+  target_weight_kg REAL,
+  monthly_change_kg REAL,             -- 月あたりの目標変化量
+  updated_at TEXT
+);
+
+-- 栄養素目標（ユーザーカスタマイズ可能）
+CREATE TABLE nutrient_goals (
+  id INTEGER PRIMARY KEY,
+  nutrient_id TEXT NOT NULL,          -- nutrient_definitions.id への参照
+  target_value REAL NOT NULL,
+  is_active INTEGER DEFAULT 1,        -- 追跡するかどうか
+  is_custom INTEGER DEFAULT 0,        -- ユーザーが手動設定したか
+  source TEXT,                        -- "calculated" / "preset" / "custom"
+  updated_at TEXT,
+  FOREIGN KEY (nutrient_id) REFERENCES nutrient_definitions(id)
+);
+
+-- 体重履歴（進捗追跡用）
+CREATE TABLE weight_history (
+  id INTEGER PRIMARY KEY,
+  date TEXT NOT NULL,
+  weight_kg REAL NOT NULL,
+  body_fat_percent REAL,              -- nullable
+  note TEXT,
+  created_at TEXT
+);
+```
+
+---
+
 ## 技術スタック
 
 ### Phase 1: ローカルオンリー（インフラ代ゼロ）
